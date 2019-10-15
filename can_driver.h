@@ -2,15 +2,26 @@
 #define FDCAN_ELEMENT_MASK_EXTID ((uint32_t)0x1FFFFFFFU) /* Extended Identifier*/
 #define FDCAN_ELEMENT_MASK_DLC   ((uint32_t)0x000F0000U) /* Data Length Code */
 
+#define FDCAN_RXF0S_F0FL_Pos      (0U)                                         
+#define FDCAN_RXF0S_F0FL_Msk      (0x7FU << FDCAN_RXF0S_F0FL_Pos)              /*!< 0x0000007F */
+#define FDCAN_RXF0S_F0FL          FDCAN_RXF0S_F0FL_Msk   
+
 #pragma once
 #include <tuple>
 
+enum class CanSpeed
+{
+    SPEED_1Mbps,
+    SPEED_500Kbps,
+    SPEED_250Kbps,
+    SPEED_125Kbps,
+};
 
 /**
  * Initializes the CAN driver
  * \param speed the CAN speed
  */
-void canDriverInit(unsigned int speed);
+void canDriverInit(CanSpeed bitRate);
 
 /**
  * Send a message through the CAN bus.

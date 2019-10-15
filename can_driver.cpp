@@ -15,6 +15,9 @@ public:
 };
 Message RxMsg;
 
+
+
+
 static Mutex rxMutex;
 static Queue<Message,8> rxQueue;
 
@@ -27,7 +30,7 @@ void canfdirq()
 	
 }
 
-void canDriverInit(unsigned int speed)
+void canDriverInit(CanSpeed bitRate)
 {
 	{
 		FastInterruptDisableLock dLock;
@@ -54,11 +57,15 @@ void canDriverInit(unsigned int speed)
 		canEn::low();
 	}
 
+
 		
 	FDCAN1->CCCR   |= FDCAN_CCCR_INIT;               //Initialize the CAN module  INIT bit is set configuration
 	
 	while( FDCAN_CCCR_INIT == 0);                      // wait until intialization begains
+	
 	FDCAN1->CCCR   |= FDCAN_CCCR_CCE;              //CCE bit enabled to start configuration cleared automatically when INIT is cleared
+	
+	FDCAN_CCU->CCFG = (0<<16) | FDCANCCU_CCFG_BCC;
 	
 	FDCAN1->CCCR   &= ~ (FDCAN_CCCR_FDOE);               //FDOE cleared to operate as classical CAN
 	FDCAN1->GFC    &=~(FDCAN_GFC_ANFE);               //FDCAN global filter for accepting any non matching extended ID message and store it in RX FIFO 0
@@ -73,8 +80,8 @@ void canDriverInit(unsigned int speed)
 	FDCAN1->RXESC &=0x00000000;             // reset RX data field (read only ask prof)
 	FDCAN1->TXESC &=0x00000000;             // reset TX data field (read only ask prof)
 	
-	FDCAN1->RXESC |=(1<<4);             // 12 byte RX data field (read only ask prof)
-	FDCAN1->TXESC |=0x00000001;             // 12 byte TX data field (read only ask prof)
+	FDCAN1->RXESC &=0x00000000;             // 8 byte RX data field (read only ask prof)
+	FDCAN1->TXESC &=0x00000000;             // 8 byte TX data field (read only ask prof)
 	
 	FDCAN1->TXBC  &=0x00000000;             // register reset for configuration 
 	FDCAN1->TXBC  &=~(1<<30);               // TX FIFO mode
@@ -82,17 +89,31 @@ void canDriverInit(unsigned int speed)
 	
 	
 	/*Enable test mode for internal loop back*/
-	FDCAN1->CCCR |= FDCAN_CCCR_TEST;
-	FDCAN1->CCCR |= FDCAN_CCCR_MON;
+	//FDCAN1->CCCR |= FDCAN_CCCR_TEST;
+	//FDCAN1->CCCR |= FDCAN_CCCR_MON;
 	
 	/*Enable loop back */
-	FDCAN1->TEST |=FDCAN_TEST_LBCK;
+	//FDCAN1->TEST |=FDCAN_TEST_LBCK;
 	
-	
+	int BRP = 0;
+	switch(bitRate){
+		case CanSpeed::SPEED_1Mbps:
+		BRP = 2;
+		break;
+		case CanSpeed::SPEED_500Kbps:
+		BRP = 4;
+		break;
+		case CanSpeed::SPEED_250Kbps:
+		BRP = 8;
+		break;
+		case CanSpeed::SPEED_125Kbps:
+		BRP = 16;
+		break;
+	}
 	/* set Nominal Bit Timming register so that sample point is at about 87.5% bit time from bit start 
-	 for 1Mbit/s, BRP = 5, TSEG1 = 17, TSEG2 =3, SJW = 1 => 1 CAN bit = 20 TQ, sample at 85%  */
+	 for 1Mbit/s, BRP = 2, TSEG1 = 19, TSEG2 =5, SJW = 9 => 1 CAN bit = 40 TQ, sample at 85%  */
 	FDCAN1->NBTP  = 0x00000000 ;  // register reset value 
-	FDCAN1->NBTP |= ((1-1)<<25) | ((5-1)<<16) | ((17-1)<<8) | ((3-1)<<0);
+	FDCAN1->NBTP |= ((10-1)<<25) | ((BRP-1)<<16) | ((39-1)<<8) | ((10-1)<<0);
 	
 	
 	
@@ -185,22 +206,27 @@ tuple<int, unsigned int> canDriverReceive(void *message, int size)
 	
 	FDCAN1->IE    &=~(1<<0);      // new message interrupt Disable RX FIFO 0
 	
-	if ((FDCAN1->RXF0S & (1<<24)) == 1){
-		//printf("RX FIFO 0 is  full \n");   // check if fifo is full or not
+	if ((FDCAN1->RXF0S & 0b1111111) == 0){
+	//if((FDCAN1->IR & FDCAN_IR_RF0N)==0) {
+		//No new message (FIFO empty)
 		return make_tuple(-2,0);
-	} else{
+	} else {
+		//FDCAN1->IR = FDCAN_IR_RF0N; //Clear new message flag
 		
 		GetIndex = ((FDCAN1->RXF0S & FDCAN_RXF0S_F0GI) >> 8);
 		
 		printf("===============================================\n");
 		printf("RX FIFO 0 RAM MEMORY \n");
+		printf("GET Index = %d\n", GetIndex);
+		
 		
 		//Accessing Rx FIFO in RAM at address 0x4000 B004
-		unsigned int volatile * Rx_FIFo0SA = (unsigned int *) 0x4000B004; 
+		unsigned int volatile * Rx_FIFo0SA = (unsigned int *) 0x4000B004;
+		
 		printf("Memory  RX address is: 0x%p\n",(void *)Rx_FIFo0SA);
 		printf("Content of that address is: 0x%x\n",*Rx_FIFo0SA);
 		
-		Rx_FIFo0SA = Rx_FIFo0SA + (GetIndex * size * 4); 
+		Rx_FIFo0SA += (GetIndex * 16)/sizeof(unsigned int); //TODO: must be equal to 8bytes(header)+FDCAN_RXESC(max message size)
 		
 		/* Retrieve Identifier */
 		RxMsg.id = *Rx_FIFo0SA & FDCAN_ELEMENT_MASK_EXTID;
@@ -233,11 +259,11 @@ tuple<int, unsigned int> canDriverReceive(void *message, int size)
 		printf("Content of that address is: 0x%x\n",*Rx_FIFo0SA++);
 		
 		
-		/* int minSize = min<int>(RxMsg.len,size);
-		memcpy(message,pData,minSize); */
+		int minSize = min<int>(RxMsg.len,size);
+		memcpy(message,pData,minSize);
 		
-		printf("\nid = %d len = %d\n",RxMsg.id,RxMsg.len);
-		memDump(rxBuffer,RxMsg.len);
+		//printf("\nid = %d len = %d\n",RxMsg.id,RxMsg.len);
+		
 		
 		/*Acknoledge and increment GetIndex*/
 		 FDCAN1->RXF0A = GetIndex; 
@@ -246,7 +272,9 @@ tuple<int, unsigned int> canDriverReceive(void *message, int size)
 		/*Lock l(rxMutex);
 		rxQueue.get(RxMsg);
 		*/
-		if(RxMsg.len>size) printf("wrong size=%d\n",RxMsg.len);
+		/* if(RxMsg.len>size) printf("wrong size=%d\n",RxMsg.len);
+		memDump(rxBuffer,RxMsg.len); */
+
 		FDCAN1->IE    |=(1<<0);      // new message interrupt Enable RX FIFO 0
 		return make_tuple(RxMsg.len<=size ? RxMsg.len : -1, RxMsg.id);
 	}
