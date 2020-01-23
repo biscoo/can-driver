@@ -1,22 +1,21 @@
 
 #include "can_driver.h"
-#include <miosix.h>
 #include <cstdio>
 #include <algorithm>
+#include <miosix.h>
+#include "kernel/scheduler/scheduler.h"
+#include "kernel/sync.h"
+
 using namespace std;
 using namespace miosix;
 
 class Message
 {
 public:
-	unsigned char message[8];
+	unsigned char canMessage[8];
 	unsigned int id;
 	unsigned char len;
 };
-Message RxMsg;
-
-
-
 
 static Mutex rxMutex;
 static Queue<Message,8> rxQueue;
@@ -24,11 +23,6 @@ static Queue<Message,8> rxQueue;
 using cantx = Gpio<GPIOA_BASE,11>;
 using canrx = Gpio<GPIOA_BASE,12>;
 using canEn = Gpio<GPIOD_BASE,3>;
-
-void canfdirq()
-{
-	
-}
 
 void canDriverInit(CanSpeed bitRate)
 {
@@ -43,11 +37,6 @@ void canDriverInit(CanSpeed bitRate)
 		RCC->D2CCIP1R |=(1<<28);  
 		
 		RCC_SYNC();
-
-		/* GPIOA->MODER   &= ~(3<<22) & ~(3<<24);	//reset PIN11 & PIN12 
-		GPIOA->MODER   |=  (3<<22) | (3<<24);   //Choose alternate function for PIN11 & PIN12 on Port A for FDCAN1 
-		GPIOA->AFR[1]  &= ~(15<<12) & ~(15<<16);//AF9
-		GPIOA->AFR[1]  |=  (9<<12) | (9<<16); */
 		
 		cantx::mode(Mode::ALTERNATE);
 		cantx::alternateFunction(9);
@@ -56,8 +45,6 @@ void canDriverInit(CanSpeed bitRate)
 		canEn::mode(Mode::OUTPUT);
 		canEn::low();
 	}
-
-
 		
 	FDCAN1->CCCR   |= FDCAN_CCCR_INIT;               //Initialize the CAN module  INIT bit is set configuration
 	
@@ -115,33 +102,17 @@ void canDriverInit(CanSpeed bitRate)
 	FDCAN1->NBTP  = 0x00000000 ;  // register reset value 
 	FDCAN1->NBTP |= ((10-1)<<25) | ((BRP-1)<<16) | ((39-1)<<8) | ((10-1)<<0);
 	
-	
-	
-	/*if data bit rate switch is enabled */
-	/* set DATA Bit Timming register so that sample point is at about 87.5% bit time from bit start 
-	 for 1Mbit/s, BRP = 5, TSEG1 = 13, TSEG2 =2, SJW = 1 => 1 CAN bit = 20 TQ, sample at 85%    */
-	/* FDCAN1->DBTP = 0x00000000;
-	FDCAN1->DBTP |= (2<<16) | (12<<8) | (1<<4);  */
-	
-	
-	
-	
-	
-	
-	FDCAN1->IE |=(1<<0);      // new message interrupt Enable RX FIFO 0
-	
+	FDCAN1->IE |= FDCAN_IE_RF0NE;      // new message interrupt Enable RX FIFO 0
+	FDCAN1->ILE |= FDCAN_ILE_EINT0;
 	
 	//filter element configuration in RAM 
 	unsigned int volatile * EX_filter_element = (unsigned int *) 0x4000AC00;
 	*EX_filter_element++ = 0x20000001;   // store message in RX FIFO 0 , EX_filter_identifier1  0b0 & 0x0000001
 	*EX_filter_element = 0x40000001;  // filter type :dual ID filter , EX_filter_identifier2  0b0 & 0x0000001
 	
-	
-	
-	
-	
-	
 	FDCAN1->CCCR   &= ~(FDCAN_CCCR_INIT);
+	
+	NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
 }
 
 int canDriverSend(unsigned int id, const void *message, int size)
@@ -153,40 +124,31 @@ int canDriverSend(unsigned int id, const void *message, int size)
 	// Accessing Tx FIFO in RAM at address 0x4000B404
 	unsigned int volatile *  Tx_FIFO = (unsigned int *) 0x4000B404; 
 	*Tx_FIFO = 0x00000000;
-	
-	printf("Memory address is: 0x%p\n",(void *)Tx_FIFO);
-	printf("Content of that address is: 0x%x\n",*Tx_FIFO);
-	
 	*Tx_FIFO = 0x40000000 | id;	// ESI=0, XTD=1,RTR =0
-	printf("Memory address is: 0x%p\n",(void *)Tx_FIFO);
-	printf("Content of that address is: 0x%x\n",*Tx_FIFO++);
+	Tx_FIFO++;
 	*Tx_FIFO = (size<<16);     // no of Data Bytes, No bit rate switching, FDF = 0, Classic CAN Tx, don't store fifo event
-	
-	printf("Memory address is: 0x%p\n",(void *)Tx_FIFO);
-	printf("Content of that address is: 0x%x\n",*Tx_FIFO++);
+	Tx_FIFO++;
 	
 	uint32_t i = 0;
 	int remaining=size;
 	while(remaining>=4)
 	{
 		*Tx_FIFO = ((msg[i+3] << 24) |
-                      (msg[i+2] << 16) |
-                      (msg[i+1] << 8) |
-                       msg[i+0]);
+                    (msg[i+2] << 16) |
+                    (msg[i+1] << 8)  |
+                     msg[i+0]);
 		i+=4;
 		remaining-=4;
-		
-		printf("Memory address is: 0x%p\n",(void *)Tx_FIFO);
-		printf("Content of that address is: 0x%x\n",*Tx_FIFO++);
+		Tx_FIFO++;
 	}
 	
 	switch(remaining)
 	{
 		case 1: *Tx_FIFO = msg[i];
 			break;
-		case 2:  *Tx_FIFO = msg[i] | (msg[i+1] << 8);
+		case 2: *Tx_FIFO = msg[i] | (msg[i+1] << 8);
 			break;
-		case 3:  *Tx_FIFO = msg[i] | (msg[i+1] << 8) | (msg[i+2] << 16);
+		case 3: *Tx_FIFO = msg[i] | (msg[i+1] << 8) | (msg[i+2] << 16);
 			break;
 	}
 	
@@ -201,90 +163,62 @@ int canDriverSend(unsigned int id, const void *message, int size)
 
 tuple<int, unsigned int> canDriverReceive(void *message, int size)
 {
-	uint32_t GetIndex = 0;
-	uint8_t  *pData;
+	Message RxMsg;
+	char *msg=reinterpret_cast<char *>(message);
+	{
+		Lock<Mutex> l(rxMutex);
+		rxQueue.get(RxMsg);
+	}
 	
-	FDCAN1->IE    &=~(1<<0);      // new message interrupt Disable RX FIFO 0
-	
-	if ((FDCAN1->RXF0S & 0b1111111) == 0){
-	//if((FDCAN1->IR & FDCAN_IR_RF0N)==0) {
-		//No new message (FIFO empty)
-		return make_tuple(-2,0);
-	} else {
-		//FDCAN1->IR = FDCAN_IR_RF0N; //Clear new message flag
-		
+	for(int i = 0; i < min<int>(RxMsg.len, size); i++)
+	{
+		msg[i] = RxMsg.canMessage[i];
+	}
+	return make_tuple(RxMsg.len<=size ? RxMsg.len : -1, RxMsg.id);
+}
+
+void __attribute__((naked)) FDCAN1_IT0_IRQHandler() {
+	saveContext();
+	asm volatile("bl _Z18FDCAN1_IT0_IRQImplv");
+	restoreContext();
+}
+
+void __attribute__((used)) FDCAN1_IT0_IRQImpl() {
+	if(FDCAN1->IR & FDCAN_IR_RF0N) {
+		Message RxMsg;
+		// Fill message fields
+		uint32_t GetIndex = 0;
+		uint8_t  *pData;
 		GetIndex = ((FDCAN1->RXF0S & FDCAN_RXF0S_F0GI) >> 8);
-		
-		printf("===============================================\n");
-		printf("RX FIFO 0 RAM MEMORY \n");
-		printf("GET Index = %d\n", GetIndex);
-		
-		
+	
 		//Accessing Rx FIFO in RAM at address 0x4000 B004
 		unsigned int volatile * Rx_FIFo0SA = (unsigned int *) 0x4000B004;
-		
-		printf("Memory  RX address is: 0x%p\n",(void *)Rx_FIFo0SA);
-		printf("Content of that address is: 0x%x\n",*Rx_FIFo0SA);
-		
-		Rx_FIFo0SA += (GetIndex * 16)/sizeof(unsigned int); //TODO: must be equal to 8bytes(header)+FDCAN_RXESC(max message size)
-		
+		Rx_FIFo0SA += (GetIndex * 16)/sizeof(unsigned int);
 		/* Retrieve Identifier */
-		RxMsg.id = *Rx_FIFo0SA & FDCAN_ELEMENT_MASK_EXTID;
-		printf("id of recieved msg = %d\n",RxMsg.id);
-		
-		printf("Memory  RX address is: 0x%p\n",(void *)Rx_FIFo0SA);
-		printf("Content of that address is: 0x%x\n",*Rx_FIFo0SA++);
-		  
-		//printf("\nDLC 0x%x\n",*Rx_FIFo0SA);
-		  
+		if(((*Rx_FIFo0SA && FDCAN_ELEMENT_MASK_XTD)>>30) == 1){
+			RxMsg.id = *Rx_FIFo0SA & FDCAN_ELEMENT_MASK_EXTID;
+		}else{
+			RxMsg.id = ((*Rx_FIFo0SA & FDCAN_ELEMENT_MASK_STDID)>>18);
+		} 
+		Rx_FIFo0SA++;
 		/* Retrieve DATA Length*/
-		
-		RxMsg.len = (*Rx_FIFo0SA & FDCAN_ELEMENT_MASK_DLC)>>16; 
-		
-		printf("Memory  RX address is: 0x%p\n",(void *)Rx_FIFo0SA);
-		printf("Content of that address is: 0x%x\n",*Rx_FIFo0SA++);
-		  
+		RxMsg.len = (*Rx_FIFo0SA & FDCAN_ELEMENT_MASK_DLC)>>16;
+		Rx_FIFo0SA++;
 		/* Retrieve Rx payload */
 		pData = (uint8_t *)Rx_FIFo0SA;
-		unsigned char rxBuffer[16];
 		for(int i = 0; i < RxMsg.len; i++)
 		{
-			rxBuffer[i] = *pData++;
-		};
-		
-		printf("Memory  RX address is: 0x%p\n",(void *)Rx_FIFo0SA);
-		printf("Content of that address is: 0x%x\n",*Rx_FIFo0SA++);
-		
-		printf("Memory  RX address is: 0x%p\n",(void *)Rx_FIFo0SA);
-		printf("Content of that address is: 0x%x\n",*Rx_FIFo0SA++);
-		
-		
-		int minSize = min<int>(RxMsg.len,size);
-		memcpy(message,pData,minSize);
-		
-		//printf("\nid = %d len = %d\n",RxMsg.id,RxMsg.len);
-		
+			RxMsg.canMessage[i] = *pData++;
+		}
 		
 		/*Acknoledge and increment GetIndex*/
-		 FDCAN1->RXF0A = GetIndex; 
-		
-		
-		/*Lock l(rxMutex);
-		rxQueue.get(RxMsg);
-		*/
-		/* if(RxMsg.len>size) printf("wrong size=%d\n",RxMsg.len);
-		memDump(rxBuffer,RxMsg.len); */
+		FDCAN1->RXF0A = GetIndex;
+		FDCAN1->IR = FDCAN_IR_RF0N; //TODO: here is good?
 
-		FDCAN1->IE    |=(1<<0);      // new message interrupt Enable RX FIFO 0
-		return make_tuple(RxMsg.len<=size ? RxMsg.len : -1, RxMsg.id);
+		bool hppw=false;
+		rxQueue.IRQput(RxMsg,hppw);
+		if(hppw) Scheduler::IRQfindNextThread();
 	}
 }
 
 
-void FDCAN1_IT0_IRQHandler(void) {
-
-  /* if 	 {			      // message pending ?
-	canDriverReceive(&RxMsg);                         // read the message
-
-  } */
-}

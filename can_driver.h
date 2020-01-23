@@ -1,5 +1,7 @@
 
 #define FDCAN_ELEMENT_MASK_EXTID ((uint32_t)0x1FFFFFFFU) /* Extended Identifier*/
+#define FDCAN_ELEMENT_MASK_XTD   ((uint32_t)0x40000000U) /* Extended Identifier*/
+#define FDCAN_ELEMENT_MASK_STDID ((uint32_t)0x1FFC0000U) /* Standard Identifier         */
 #define FDCAN_ELEMENT_MASK_DLC   ((uint32_t)0x000F0000U) /* Data Length Code */
 
 #define FDCAN_RXF0S_F0FL_Pos      (0U)                                         
@@ -16,6 +18,7 @@ enum class CanSpeed
     SPEED_250Kbps,
     SPEED_125Kbps,
 };
+
 
 /**
  * Initializes the CAN driver
